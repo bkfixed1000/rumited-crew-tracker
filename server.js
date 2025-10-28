@@ -1,9 +1,5 @@
-// server.js — Crew tracker (CommonJS) — v2.2
-// - Name required, display override
-// - Fallback cards when no scrape data
-// - Viewer "Refresh" button: public refresh endpoint gated by VIEW_TOKEN + cooldown
+// server.js — Crew tracker — v2.2a (no node-fetch; uses Node 18 global fetch)
 const express = require('express');
-const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
 const app = express();
@@ -20,15 +16,14 @@ const TEAM_NAME = (process.env.TEAM_NAME || '').trim();
 const RACE_SLUG = (process.env.RACE_SLUG || 'rumited2025JTBC').trim();
 const RACE_JOIN_CODE = (process.env.RACE_JOIN_CODE || '').trim();
 
-// State (in-memory)
+// State
 const state = {
-  whitelist: new Set(),         // set of BIB strings
-  displayNames: new Map(),      // BIB -> display name
+  whitelist: new Set(),
+  displayNames: new Map(),
   latestPayload: { ts: 0, rows: [] },
   lastManualRefreshAt: 0,
 };
 
-// --- Helpers
 function requireAdmin(req, res, next) {
   const hdr = req.headers['authorization'] || '';
   if (hdr === `Bearer ${ADMIN_TOKEN}`) return next();
@@ -39,6 +34,7 @@ function requireViewToken(req, res, next) {
   if (t === VIEW_TOKEN) return next();
   return res.status(401).json({ ok:false, error:'invalid token' });
 }
+
 function buildFallbackRows() {
   const rows = [];
   for (const bib of state.whitelist) {
@@ -48,12 +44,11 @@ function buildFallbackRows() {
   return rows;
 }
 
-// --- Scraper (adjust selectors per race page if needed)
 async function scrape() {
   let rows = [];
   if (SOURCE_URL) {
     try {
-      const r = await fetch(SOURCE_URL, { headers: { 'User-Agent':'crew-tracker/1.4' }});
+      const r = await fetch(SOURCE_URL, { headers: { 'User-Agent':'crew-tracker/1.4 (render)' }});
       if (r.ok) {
         const html = await r.text();
         const $ = cheerio.load(html);
@@ -71,30 +66,22 @@ async function scrape() {
             rows.push({ bib, name: override || name, team, split: splitOrTime });
           });
         });
+      } else {
+        console.error('fetch failed', r.status, r.statusText);
       }
     } catch (e) {
       console.error('scrape error', e.message);
     }
   }
-
-  // Filter by whitelist (if empty => show all scraped; else only registered bibs)
   let filtered = rows;
-  if (state.whitelist.size > 0) {
-    filtered = rows.filter(r => state.whitelist.has(String(r.bib)));
-  }
-
-  // Fallback: if nothing scraped/matched, but we have registrations, show them
-  if ((!filtered || filtered.length === 0) && state.whitelist.size > 0) {
-    filtered = buildFallbackRows();
-  }
-
+  if (state.whitelist.size > 0) filtered = rows.filter(r => state.whitelist.has(String(r.bib)));
+  if ((!filtered || filtered.length === 0) && state.whitelist.size > 0) filtered = buildFallbackRows();
   state.latestPayload = { ts: Date.now(), rows: filtered };
 }
 
-// Poll loop
 setInterval(async () => { await scrape(); }, POLL_INTERVAL_MS);
 
-// --- Join form (runner self-register by bib + REQUIRED name)
+// Join form
 app.get(`/${RACE_SLUG}`, (req, res) => {
   res.set('Content-Type','text/html; charset=utf-8');
   res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -135,7 +122,7 @@ app.post('/api/join', (req, res) => {
   res.end(`<meta charset="utf-8"/><p>등록 완료! 배번 #${b}, 이름 ${d}</p><p><a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}">실시간 보기로 이동</a></p>`);
 });
 
-// Public refresh endpoint (gated by VIEW_TOKEN + cooldown 5s)
+// Public refresh (VIEW_TOKEN + 5s cooldown)
 app.post('/refresh', requireViewToken, async (req, res) => {
   const now = Date.now();
   if (now - state.lastManualRefreshAt < 5000) {
@@ -146,11 +133,11 @@ app.post('/refresh', requireViewToken, async (req, res) => {
     await scrape();
     res.json({ ok:true, ts: state.latestPayload.ts, count: state.latestPayload.rows.length });
   } catch (e) {
-    res.status(500).json({ ok:false, error: e.message });
+    res.status(500).json({ ok:false, error:e.message });
   }
 });
 
-// Viewer
+// Viewer (with flash highlight)
 app.get('/viewer/:slug', requireViewToken, (req, res) => {
   if (req.params.slug !== RACE_SLUG) return res.status(404).send('not found');
   res.set('Content-Type','text/html; charset=utf-8');
@@ -179,16 +166,30 @@ app.get('/viewer/:slug', requireViewToken, (req, res) => {
     const last = document.getElementById('last');
     const btn = document.getElementById('refresh');
     const status = document.getElementById('status');
+    let lastRows = [];
     function render(p){
       const { ts, rows } = p||{ts:0,rows:[]};
       last.textContent = ts? new Date(ts).toLocaleTimeString() : '-';
+      const before = new Map((lastRows||[]).map(r=>[String(r.bib), r]));
       list.innerHTML = rows.map(r=>`
-        <div class='card'>
+        <div class='card' data-bib='${r.bib}'>
           <div class='meta'><span>#${r.bib}</span> <span>${r.team||''}</span></div>
           <div class='name'>${r.name||''}</div>
           <div class='split'>${r.split||''}</div>
         </div>`
       ).join('');
+      (rows||[]).forEach(r=>{
+        const el = list.querySelector("[data-bib='"+String(r.bib)+"']");
+        const prev = before.get(String(r.bib));
+        if (!prev || (prev.split||'') !== (r.split||'') || (prev.name||'') !== (r.name||'')) {
+          if (el) el.animate([
+            { filter:'brightness(0.9)' },
+            { filter:'brightness(1.35)' },
+            { filter:'brightness(1.0)' }
+          ], { duration:600, easing:'ease' });
+        }
+      });
+      lastRows = rows||[];
     }
     es.onmessage = e=>{ try{ render(JSON.parse(e.data)); }catch{} };
     btn.onclick = async ()=>{
@@ -199,19 +200,18 @@ app.get('/viewer/:slug', requireViewToken, (req, res) => {
         if(j.ok){ status.textContent = '갱신 완료 (' + new Date(j.ts).toLocaleTimeString() + ')'; }
         else { status.textContent = '대기(과다요청)'; }
       }catch{ status.textContent = '오류'; }
-      finally{ setTimeout(()=>{ btn.disabled=false; }, 1200); }
+      finally{ setTimeout(()=>{ btn.disabled=false; }, 800); }
     };
   </script>
   </main></body></html>`);
 });
 
-// Data APIs & SSE
+// APIs & SSE
 app.get('/api/crew', requireViewToken, (req, res) => {
   const { slug } = req.query;
   if (slug !== RACE_SLUG) return res.status(404).json({ ok:false });
   res.json(state.latestPayload);
 });
-
 app.get('/events', requireViewToken, (req, res) => {
   const { slug } = req.query;
   if (slug !== RACE_SLUG) return res.status(404).end();
@@ -222,20 +222,13 @@ app.get('/events', requireViewToken, (req, res) => {
   req.on('close', () => clearInterval(iv));
 });
 
-// Admin
-app.post('/admin/whitelist', requireAdmin, (req, res) => {
-  const s = new Set();
-  if (Array.isArray(req.body?.bibs)) req.body.bibs.forEach(b => s.add(String(b).trim()));
-  state.whitelist = s;
-  res.json({ ok:true, count: s.size });
-});
-
+// Admin refresh
 app.post('/admin/refresh', requireAdmin, async (req, res) => {
   try { await scrape(); res.json({ ok:true, ts: state.latestPayload.ts, count: state.latestPayload.rows.length }); }
   catch(e){ res.status(500).json({ ok:false, error:e.message }); }
 });
 
-// Root redirect to viewer
+// Root redirect
 app.get('/', (req,res) => {
   res.redirect(`/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}`);
 });
@@ -243,4 +236,4 @@ app.get('/', (req,res) => {
 // Health
 app.get('/healthz', (_,res)=>res.send('ok'));
 
-app.listen(PORT, ()=> console.log('crew-tracker v2.2 on', PORT, 'slug=', RACE_SLUG));
+app.listen(PORT, ()=> console.log('crew-tracker v2.2a on', PORT, 'slug=', RACE_SLUG));
