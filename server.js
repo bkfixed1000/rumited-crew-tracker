@@ -1,10 +1,7 @@
-// server.js — Crew tracker — v2.2a (no node-fetch; uses Node 18 global fetch)
-const express = require('express');
-const cheerio = require('cheerio');
-
-const app = express();
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+// server.js — Crew tracker — v2.2b (Zero dependency: no express/cheerio/node-fetch)
+const http = require('http');
+const { URL } = require('url');
+const querystring = require('querystring');
 
 // ENV
 const PORT = process.env.PORT || 3000;
@@ -22,17 +19,27 @@ const state = {
   displayNames: new Map(),
   latestPayload: { ts: 0, rows: [] },
   lastManualRefreshAt: 0,
+  sseClients: new Set(),
 };
 
-function requireAdmin(req, res, next) {
-  const hdr = req.headers['authorization'] || '';
-  if (hdr === `Bearer ${ADMIN_TOKEN}`) return next();
-  return res.status(401).json({ ok:false, error:'unauthorized' });
+function sendJSON(res, code, obj) {
+  const data = Buffer.from(JSON.stringify(obj));
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': data.length });
+  res.end(data);
 }
-function requireViewToken(req, res, next) {
-  const t = (req.query.t || '').toString();
-  if (t === VIEW_TOKEN) return next();
-  return res.status(401).json({ ok:false, error:'invalid token' });
+
+function sendHTML(res, html) {
+  const data = Buffer.from(html);
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': data.length });
+  res.end(data);
+}
+
+function unauthorized(res) { sendJSON(res, 401, { ok:false, error:'unauthorized' }); }
+function notFound(res) { res.writeHead(404); res.end('not found'); }
+
+function requireViewToken(urlObj) {
+  const t = String(urlObj.searchParams.get('t') || '');
+  return t === VIEW_TOKEN;
 }
 
 function buildFallbackRows() {
@@ -44,6 +51,32 @@ function buildFallbackRows() {
   return rows;
 }
 
+// naive table parser (best-effort): looks for <tr> ... <td>...</td> ... sequences
+function parseTable(html) {
+  const rows = [];
+  const trRe = /<tr[\s\S]*?<\/tr>/gi;
+  const tdRe = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+  const strip = (s)=> String(s).replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+  let m;
+  while ((m = trRe.exec(html)) !== null) {
+    const tr = m[0];
+    const cells = [];
+    let c;
+    while ((c = tdRe.exec(tr)) !== null) cells.push(strip(c[1]));
+    if (cells.length >= 2) {
+      const bib = cells[0];
+      const name = cells[1];
+      const team = cells[2] || '';
+      const split = cells[3] || '';
+      if (bib && name) {
+        if (TEAM_NAME && team && !team.includes(TEAM_NAME)) continue;
+        rows.push({ bib, name, team, split });
+      }
+    }
+  }
+  return rows;
+}
+
 async function scrape() {
   let rows = [];
   if (SOURCE_URL) {
@@ -51,21 +84,9 @@ async function scrape() {
       const r = await fetch(SOURCE_URL, { headers: { 'User-Agent':'crew-tracker/1.4 (render)' }});
       if (r.ok) {
         const html = await r.text();
-        const $ = cheerio.load(html);
-        $('table').each((_, table) => {
-          $(table).find('tr').each((__, tr) => {
-            const tds = $(tr).find('td');
-            if (tds.length < 2) return;
-            const bib = $(tds[0]).text().trim();
-            const name = $(tds[1]).text().trim();
-            const team = tds[2] ? $(tds[2]).text().trim() : '';
-            const splitOrTime = tds[3] ? $(tds[3]).text().trim() : '';
-            if (!bib || !name) return;
-            if (TEAM_NAME && team && !team.includes(TEAM_NAME)) return;
-            const override = state.displayNames.get(String(bib));
-            rows.push({ bib, name: override || name, team, split: splitOrTime });
-          });
-        });
+        rows = parseTable(html);
+        // apply display name overrides
+        rows = rows.map(r => ({ ...r, name: state.displayNames.get(String(r.bib)) || r.name }));
       } else {
         console.error('fetch failed', r.status, r.statusText);
       }
@@ -77,14 +98,18 @@ async function scrape() {
   if (state.whitelist.size > 0) filtered = rows.filter(r => state.whitelist.has(String(r.bib)));
   if ((!filtered || filtered.length === 0) && state.whitelist.size > 0) filtered = buildFallbackRows();
   state.latestPayload = { ts: Date.now(), rows: filtered };
+  // push to SSE clients
+  const payload = `data: ${JSON.stringify(state.latestPayload)}\n\n`;
+  for (const res of state.sseClients) {
+    try { res.write(payload); } catch {}
+  }
 }
 
-setInterval(async () => { await scrape(); }, POLL_INTERVAL_MS);
+setInterval(scrape, POLL_INTERVAL_MS);
 
-// Join form
-app.get(`/${RACE_SLUG}`, (req, res) => {
-  res.set('Content-Type','text/html; charset=utf-8');
-  res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+// HTML templates
+function joinHTML() {
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>${RACE_SLUG} — 주자 등록</title>
   <style>
   body{font-family:system-ui,Segoe UI,Roboto,Noto Sans,Arial,sans-serif;background:#0b0d10;color:#e9f0f5;margin:0;padding:16px}
@@ -105,43 +130,11 @@ app.get(`/${RACE_SLUG}`, (req, res) => {
     <button type="submit">등록</button>
   </form>
   <p style="margin-top:14px">이미 등록했나요? <a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}" target="_blank">실시간 보기</a></p>
-  </main></body></html>`);
-});
+  </main></body></html>`;
+}
 
-app.post('/api/join', (req, res) => {
-  const { slug, code, bib, display } = req.body || {};
-  if (slug !== RACE_SLUG) return res.status(400).send('invalid slug');
-  if (RACE_JOIN_CODE && code !== RACE_JOIN_CODE) return res.status(401).send('wrong code');
-  const b = String(bib||'').trim();
-  const d = String(display||'').trim();
-  if (!b) return res.status(400).send('missing bib');
-  if (!d) return res.status(400).send('missing name');
-  state.whitelist.add(b);
-  state.displayNames.set(b, d);
-  res.set('Content-Type','text/html; charset=utf-8');
-  res.end(`<meta charset="utf-8"/><p>등록 완료! 배번 #${b}, 이름 ${d}</p><p><a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}">실시간 보기로 이동</a></p>`);
-});
-
-// Public refresh (VIEW_TOKEN + 5s cooldown)
-app.post('/refresh', requireViewToken, async (req, res) => {
-  const now = Date.now();
-  if (now - state.lastManualRefreshAt < 5000) {
-    return res.status(429).json({ ok:false, error:'too many refreshes' });
-  }
-  state.lastManualRefreshAt = now;
-  try {
-    await scrape();
-    res.json({ ok:true, ts: state.latestPayload.ts, count: state.latestPayload.rows.length });
-  } catch (e) {
-    res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-// Viewer (with flash highlight)
-app.get('/viewer/:slug', requireViewToken, (req, res) => {
-  if (req.params.slug !== RACE_SLUG) return res.status(404).send('not found');
-  res.set('Content-Type','text/html; charset=utf-8');
-  res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+function viewerHTML() {
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Crew Live — ${RACE_SLUG}</title>
   <style>
   body{font-family:system-ui,Segoe UI,Roboto,Noto Sans,Arial,sans-serif;background:#0b0d10;color:#e9f0f5;margin:0}
@@ -203,37 +196,92 @@ app.get('/viewer/:slug', requireViewToken, (req, res) => {
       finally{ setTimeout(()=>{ btn.disabled=false; }, 800); }
     };
   </script>
-  </main></body></html>`);
+  </main></body></html>`;
+}
+
+// HTTP server
+const server = http.createServer(async (req, res) => {
+  try {
+    const urlObj = new URL(req.url, `http://${req.headers.host}`);
+    // root -> redirect to viewer
+    if (urlObj.pathname === '/') {
+      res.writeHead(302, { Location: `/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}` });
+      return res.end();
+    }
+    if (urlObj.pathname === '/healthz') return res.end('ok');
+
+    // join page
+    if (urlObj.pathname === `/${RACE_SLUG}` && req.method === 'GET') {
+      return sendHTML(res, joinHTML());
+    }
+    // join submit
+    if (urlObj.pathname === '/api/join' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        const data = querystring.parse(body);
+        const slug = String(data.slug || '');
+        const code = String(data.code || '');
+        const bib = String(data.bib || '').trim();
+        const display = String(data.display || '').trim();
+        if (slug !== RACE_SLUG) return sendHTML(res, 'invalid slug');
+        if (RACE_JOIN_CODE && code !== RACE_JOIN_CODE) return sendHTML(res, 'wrong code');
+        if (!bib) return sendHTML(res, 'missing bib');
+        if (!display) return sendHTML(res, 'missing name');
+        state.whitelist.add(bib);
+        state.displayNames.set(bib, display);
+        return sendHTML(res, `<meta charset="utf-8"/><p>등록 완료! 배번 #${bib}, 이름 ${display}</p><p><a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}">실시간 보기로 이동</a></p>`);
+      });
+      return;
+    }
+
+    // API: crew
+    if (urlObj.pathname === '/api/crew' && req.method === 'GET') {
+      if (!requireViewToken(urlObj)) return unauthorized(res);
+      const slug = urlObj.searchParams.get('slug');
+      if (slug !== RACE_SLUG) return notFound(res);
+      return sendJSON(res, 200, state.latestPayload);
+    }
+
+    // SSE events
+    if (urlObj.pathname === '/events' && req.method === 'GET') {
+      if (!requireViewToken(urlObj)) return unauthorized(res);
+      const slug = urlObj.searchParams.get('slug');
+      if (slug !== RACE_SLUG) return notFound(res);
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      res.write(`data: ${JSON.stringify(state.latestPayload)}\n\n`);
+      state.sseClients.add(res);
+      req.on('close', () => state.sseClients.delete(res));
+      return;
+    }
+
+    // public refresh
+    if (urlObj.pathname === '/refresh' && req.method === 'POST') {
+      if (!requireViewToken(urlObj)) return unauthorized(res);
+      const now = Date.now();
+      if (now - state.lastManualRefreshAt < 5000) return sendJSON(res, 429, { ok:false, error:'too many refreshes' });
+      state.lastManualRefreshAt = now;
+      await scrape();
+      return sendJSON(res, 200, { ok:true, ts: state.latestPayload.ts, count: state.latestPayload.rows.length });
+    }
+
+    // viewer
+    if (urlObj.pathname === `/viewer/${RACE_SLUG}` && req.method === 'GET') {
+      if (!requireViewToken(urlObj)) return unauthorized(res);
+      return sendHTML(res, viewerHTML());
+    }
+
+    notFound(res);
+  } catch (e) {
+    res.writeHead(500);
+    res.end(String(e.message||e));
+  }
 });
 
-// APIs & SSE
-app.get('/api/crew', requireViewToken, (req, res) => {
-  const { slug } = req.query;
-  if (slug !== RACE_SLUG) return res.status(404).json({ ok:false });
-  res.json(state.latestPayload);
+server.listen(PORT, () => {
+  console.log('crew-tracker v2.2b (no deps) on', PORT, 'slug=', RACE_SLUG);
 });
-app.get('/events', requireViewToken, (req, res) => {
-  const { slug } = req.query;
-  if (slug !== RACE_SLUG) return res.status(404).end();
-  res.set({ 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache', Connection:'keep-alive' });
-  const send = () => res.write(`data: ${JSON.stringify(state.latestPayload)}\n\n`);
-  send();
-  const iv = setInterval(send, POLL_INTERVAL_MS);
-  req.on('close', () => clearInterval(iv));
-});
-
-// Admin refresh
-app.post('/admin/refresh', requireAdmin, async (req, res) => {
-  try { await scrape(); res.json({ ok:true, ts: state.latestPayload.ts, count: state.latestPayload.rows.length }); }
-  catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-});
-
-// Root redirect
-app.get('/', (req,res) => {
-  res.redirect(`/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}`);
-});
-
-// Health
-app.get('/healthz', (_,res)=>res.send('ok'));
-
-app.listen(PORT, ()=> console.log('crew-tracker v2.2a on', PORT, 'slug=', RACE_SLUG));

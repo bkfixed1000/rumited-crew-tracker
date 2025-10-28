@@ -1,8 +1,8 @@
 {
   "name": "rumited-crew-tracker",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
-  "description": "Runner whitelist viewer with refresh + flash, using Node 18 global fetch (no node-fetch)",
+  "description": "Zero-dependency Node server with fallback cards + refresh + highlight",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,8 +10,5 @@
   "engines": {
     "node": ">=18"
   },
-  "dependencies": {
-    "cheerio": "^1.0.0-rc.12",
-    "express": "^4.18.2"
-  }
+  "dependencies": {}
 }
