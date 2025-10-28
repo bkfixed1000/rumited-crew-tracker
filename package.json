@@ -1,14 +1,14 @@
 {
   "name": "rumited-crew-tracker",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "private": true,
-  "description": "Zero-dependency Node server with fallback cards + refresh + highlight",
+  "description": "Zero-dependency Node server with fallback cards + refresh + highlight (fixed)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {}
 }

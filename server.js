@@ -1,4 +1,4 @@
-// server.js — Crew tracker — v2.2b (Zero dependency: no express/cheerio/node-fetch)
+// server.js — Crew tracker — v2.2b-fixed (Zero dependency + nested backticks removed)
 const http = require('http');
 const { URL } = require('url');
 const querystring = require('querystring');
@@ -51,7 +51,7 @@ function buildFallbackRows() {
   return rows;
 }
 
-// naive table parser (best-effort): looks for <tr> ... <td>...</td> ... sequences
+// naive table parser (best-effort)
 function parseTable(html) {
   const rows = [];
   const trRe = /<tr[\s\S]*?<\/tr>/gi;
@@ -85,7 +85,6 @@ async function scrape() {
       if (r.ok) {
         const html = await r.text();
         rows = parseTable(html);
-        // apply display name overrides
         rows = rows.map(r => ({ ...r, name: state.displayNames.get(String(r.bib)) || r.name }));
       } else {
         console.error('fetch failed', r.status, r.statusText);
@@ -98,7 +97,6 @@ async function scrape() {
   if (state.whitelist.size > 0) filtered = rows.filter(r => state.whitelist.has(String(r.bib)));
   if ((!filtered || filtered.length === 0) && state.whitelist.size > 0) filtered = buildFallbackRows();
   state.latestPayload = { ts: Date.now(), rows: filtered };
-  // push to SSE clients
   const payload = `data: ${JSON.stringify(state.latestPayload)}\n\n`;
   for (const res of state.sseClients) {
     try { res.write(payload); } catch {}
@@ -134,6 +132,7 @@ function joinHTML() {
 }
 
 function viewerHTML() {
+  // NOTE: No nested backticks inside this template string.
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Crew Live — ${RACE_SLUG}</title>
   <style>
@@ -161,18 +160,20 @@ function viewerHTML() {
     const status = document.getElementById('status');
     let lastRows = [];
     function render(p){
-      const { ts, rows } = p||{ts:0,rows:[]};
-      last.textContent = ts? new Date(ts).toLocaleTimeString() : '-';
-      const before = new Map((lastRows||[]).map(r=>[String(r.bib), r]));
-      list.innerHTML = rows.map(r=>`
-        <div class='card' data-bib='${r.bib}'>
-          <div class='meta'><span>#${r.bib}</span> <span>${r.team||''}</span></div>
-          <div class='name'>${r.name||''}</div>
-          <div class='split'>${r.split||''}</div>
-        </div>`
-      ).join('');
-      (rows||[]).forEach(r=>{
-        const el = list.querySelector("[data-bib='"+String(r.bib)+"']");
+      const ts = (p && p.ts) ? p.ts : 0;
+      const rows = (p && p.rows) ? p.rows : [];
+      last.textContent = ts ? new Date(ts).toLocaleTimeString() : '-';
+      const before = new Map((lastRows||[]).map(function(r){ return [String(r.bib), r]; }));
+      list.innerHTML = rows.map(function(r){
+        return ""
+          + "<div class='card' data-bib='" + String(r.bib) + "'>"
+          +   "<div class='meta'><span>#"+ String(r.bib) +"</span> <span>"+ (r.team||'') +"</span></div>"
+          +   "<div class='name'>"+ (r.name||'') +"</div>"
+          +   "<div class='split'>"+ (r.split||'') +"</div>"
+          + "</div>";
+      }).join("");
+      rows.forEach(function(r){
+        const el = list.querySelector("[data-bib='"+ String(r.bib) +"']");
         const prev = before.get(String(r.bib));
         if (!prev || (prev.split||'') !== (r.split||'') || (prev.name||'') !== (r.name||'')) {
           if (el) el.animate([
@@ -182,10 +183,10 @@ function viewerHTML() {
           ], { duration:600, easing:'ease' });
         }
       });
-      lastRows = rows||[];
+      lastRows = rows;
     }
-    es.onmessage = e=>{ try{ render(JSON.parse(e.data)); }catch{} };
-    btn.onclick = async ()=>{
+    es.onmessage = function(e){ try{ render(JSON.parse(e.data)); }catch{} };
+    btn.onclick = async function(){
       btn.disabled = true; status.textContent = '갱신 중...';
       try{
         const r = await fetch('/refresh?t='+encodeURIComponent(t), { method:'POST' });
@@ -193,7 +194,7 @@ function viewerHTML() {
         if(j.ok){ status.textContent = '갱신 완료 (' + new Date(j.ts).toLocaleTimeString() + ')'; }
         else { status.textContent = '대기(과다요청)'; }
       }catch{ status.textContent = '오류'; }
-      finally{ setTimeout(()=>{ btn.disabled=false; }, 800); }
+      finally{ setTimeout(function(){ btn.disabled=false; }, 800); }
     };
   </script>
   </main></body></html>`;
@@ -283,5 +284,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log('crew-tracker v2.2b (no deps) on', PORT, 'slug=', RACE_SLUG);
+  console.log('crew-tracker v2.2b-fixed (no deps) on', PORT, 'slug=', RACE_SLUG);
 });
