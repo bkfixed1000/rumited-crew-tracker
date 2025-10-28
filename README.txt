@@ -1,6 +1,5 @@
-v2.2b-fixed
-- 외부 모듈 0개 (설치 불필요)
-- 뷰어 스크립트의 중첩 백틱 제거
-- Start Command: node server.js
-- Build Command: true (또는 echo "no build")
-- Node engines: 20.x (LTS)
+v2.3.1 변경점
+- myresult '상세 페이지' 형태(번호/이름/소속 라벨 + 구간 테이블)에서도 파싱 가능
+- 리스트 테이블, 상세 페이지 둘 다 인식 → 자동 선택
+- 통과 km + (선택) 추정 km 표시 유지
+- Zero dependency, Node 20.x
