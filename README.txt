@@ -1,10 +1,3 @@
-Render 배포 빠른 가이드(Zip 업로드용)
-1) Render → New → Web Service → Manual Deploy(Upload ZIP) 선택
-2) 이 ZIP 업로드
-3) Environment 탭에서 다음 값이 .env로 들어가도록 Add Env Vars (선택) 또는 파일 그대로 사용
-4) Start Command: node server.js  (Build Command는 비워도 됩니다. Render가 npm i 자동 실행)
-5) 배포 후 확인:
-   - /healthz → ok
-   - /rumited2025JTBC → 주자 등록 폼
-   - /viewer/rumited2025JTBC?t=rumited-crew-only → 실시간 뷰
-주의: 실제 대회 페이지의 테이블 구조가 다르면 server.js의 테이블 선택자를 조정해야 합니다.
+v2 변경점: 이름 필수 + 표시이름이 결과 화면에 적용됨, 루트(/) 자동 리다이렉트 → 뷰어
+배포 방법은 v1과 동일
+Start Command: node server.js

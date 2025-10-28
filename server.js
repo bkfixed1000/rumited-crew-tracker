@@ -1,4 +1,4 @@
-// server.js — Crew tracker (CommonJS) — ready for Render free tier
+// server.js — Crew tracker (CommonJS) — v2 (Name required + display override)
 const express = require('express');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
@@ -19,7 +19,8 @@ const RACE_JOIN_CODE = (process.env.RACE_JOIN_CODE || '').trim();
 
 // State (in-memory)
 const state = {
-  whitelist: new Set(), // set of BIB strings
+  whitelist: new Set(),         // set of BIB strings
+  displayNames: new Map(),      // BIB -> display name
   latestPayload: { ts: 0, rows: [] },
 };
 
@@ -38,24 +39,25 @@ function requireViewToken(req, res, next) {
 // --- Scraper (adjust selectors per race page if needed)
 async function scrape() {
   if (!SOURCE_URL) return;
-  const r = await fetch(SOURCE_URL, { headers: { 'User-Agent':'crew-tracker/1.1' }});
+  const r = await fetch(SOURCE_URL, { headers: { 'User-Agent':'crew-tracker/1.2' }});
   if (!r.ok) throw new Error('fetch failed: ' + r.status);
   const html = await r.text();
   const $ = cheerio.load(html);
 
-  // Generic table parse: find rows with <td>, pick first 4 columns if exist
   const rows = [];
   $('table').each((_, table) => {
     $(table).find('tr').each((__, tr) => {
       const tds = $(tr).find('td');
-      if (tds.length < 2) return; // skip header or invalid rows
+      if (tds.length < 2) return;
       const bib = $(tds[0]).text().trim();
       const name = $(tds[1]).text().trim();
       const team = tds[2] ? $(tds[2]).text().trim() : '';
       const splitOrTime = tds[3] ? $(tds[3]).text().trim() : '';
       if (!bib || !name) return;
       if (TEAM_NAME && team && !team.includes(TEAM_NAME)) return;
-      rows.push({ bib, name, team, split: splitOrTime });
+      // override name if user provided display name
+      const display = state.displayNames.get(String(bib));
+      rows.push({ bib, name: display || name, team, split: splitOrTime });
     });
   });
 
@@ -69,7 +71,7 @@ setInterval(async () => {
   try { await scrape(); } catch (e) { console.error('scrape error', e.message); }
 }, POLL_INTERVAL_MS);
 
-// --- Join form (runner self-register by bib)
+// --- Join form (runner self-register by bib + REQUIRED name)
 app.get(`/${RACE_SLUG}`, (req, res) => {
   res.set('Content-Type','text/html; charset=utf-8');
   res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -81,15 +83,15 @@ app.get(`/${RACE_SLUG}`, (req, res) => {
   label{display:block;margin:12px 0 6px}button{cursor:pointer}form{display:grid;gap:10px}a{color:#9dd1ff}
   </style></head><body><main>
   <h1>🏁 ${RACE_SLUG} — 주자 등록</h1>
-  <p>배번을 입력하면 실시간 뷰에 반영됩니다.${RACE_JOIN_CODE ? ' 합류코드가 필요합니다.' : ''}</p>
+  <p>배번과 이름을 입력하면 뷰어에 반영됩니다.${RACE_JOIN_CODE ? ' 합류코드가 필요합니다.' : ''}</p>
   <form method="post" action="/api/join">
     <input type="hidden" name="slug" value="${RACE_SLUG}"/>
     <label>합류 코드 (선택)</label>
     <input name="code" placeholder="합류 코드(없으면 비워두기)" />
-    <label>배번(BIB)</label>
+    <label>배번(BIB) <span style="color:#ff9">※필수</span></label>
     <input name="bib" placeholder="예: 12345" required />
-    <label>표시 이름(선택)</label>
-    <input name="display" placeholder="예: 홍길동" />
+    <label>이름 <span style="color:#ff9">※필수</span></label>
+    <input name="display" placeholder="예: 홍길동" required />
     <button type="submit">등록</button>
   </form>
   <p style="margin-top:14px">이미 등록했나요? <a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}" target="_blank">실시간 보기</a></p>
@@ -101,10 +103,13 @@ app.post('/api/join', (req, res) => {
   if (slug !== RACE_SLUG) return res.status(400).send('invalid slug');
   if (RACE_JOIN_CODE && code !== RACE_JOIN_CODE) return res.status(401).send('wrong code');
   const b = String(bib||'').trim();
+  const d = String(display||'').trim();
   if (!b) return res.status(400).send('missing bib');
+  if (!d) return res.status(400).send('missing name');
   state.whitelist.add(b);
+  state.displayNames.set(b, d);
   res.set('Content-Type','text/html; charset=utf-8');
-  res.end(`<meta charset="utf-8"/><p>등록 완료! 배번 #${b}</p><p><a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}">실시간 보기로 이동</a></p>`);
+  res.end(`<meta charset="utf-8"/><p>등록 완료! 배번 #${b}, 이름 ${d}</p><p><a href="/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}">실시간 보기로 이동</a></p>`);
 });
 
 // Viewer
@@ -175,7 +180,12 @@ app.post('/admin/refresh', requireAdmin, async (req, res) => {
   catch(e){ res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// Root redirect to viewer (optional convenience)
+app.get('/', (req,res) => {
+  res.redirect(`/viewer/${RACE_SLUG}?t=${encodeURIComponent(VIEW_TOKEN)}`);
+});
+
 // Health
 app.get('/healthz', (_,res)=>res.send('ok'));
 
-app.listen(PORT, ()=> console.log('crew-tracker backend on', PORT, 'slug=', RACE_SLUG));
+app.listen(PORT, ()=> console.log('crew-tracker backend v2 on', PORT, 'slug=', RACE_SLUG));
